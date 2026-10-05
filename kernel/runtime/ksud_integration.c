@@ -44,6 +44,10 @@
 #include "feature/selinux_hide.h"
 #include "selinux/selinux.h"
 #include "compat/kernel_compat.h"
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#endif
+
 
 static const char KERNEL_SU_RC[] =
 	"\n"
@@ -639,6 +643,25 @@ void ksu_handle_sys_read(unsigned int fd)
 
     fput(file);
 }
+
+#ifdef CONFIG_KSU_SUSFS
+void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr)
+{
+	loff_t new_size = *kstat_size_ptr + ksu_rc_len;
+	struct file *file = fget(fd);
+
+	if (!file)
+		return;
+
+	if (is_init_rc(file)) {
+		pr_info("stat init.rc");
+		pr_info("adding ksu_rc_len: %lld -> %lld", *kstat_size_ptr, new_size);
+		*kstat_size_ptr = new_size;
+	}
+	fput(file);
+}
+#endif
+
 
 static unsigned int volumedown_pressed_count = 0;
 

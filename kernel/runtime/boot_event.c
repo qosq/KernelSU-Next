@@ -2,6 +2,7 @@
 #include <linux/fs.h>
 #include <linux/namei.h>
 #include <linux/printk.h>
+#include <linux/jump_label.h>
 
 #include "feature/selinux_hide.h"
 
@@ -14,6 +15,10 @@
 
 bool ksu_module_mounted __read_mostly = false;
 bool ksu_boot_completed __read_mostly = false;
+
+#ifdef CONFIG_KSU_SUSFS
+extern struct static_key_true ksu_is_input_hook_enabled;
+#endif
 
 extern void ksu_avc_spoof_late_init();
 
@@ -30,10 +35,18 @@ void on_post_fs_data(void)
 	ksu_load_allow_list();
 	ksu_observer_init();
 	// sanity check, this may influence the performance
+#ifdef CONFIG_KSU_SUSFS
+    if (static_key_enabled(&ksu_is_input_hook_enabled)) {
+        static_branch_disable(&ksu_is_input_hook_enabled);
+        pr_info("ksu_is_input_hook is disabled\n");
+    }
+#else
 	ksu_stop_input_hook_runtime();
+#endif
 	ksu_selinux_hide_handle_post_fs_data();
 }
 
+#ifdef CONFIG_EXT4_FS
 extern void ext4_unregister_sysfs(struct super_block *sb);
 
 int nuke_ext4_sysfs(const char *mnt)
@@ -57,6 +70,12 @@ int nuke_ext4_sysfs(const char *mnt)
 	path_put(&path);
 	return 0;
 }
+#else
+int nuke_ext4_sysfs(const char *mnt)
+{
+    return -EOPNOTSUPP;
+}
+#endif
 
 void on_module_mounted(void)
 {

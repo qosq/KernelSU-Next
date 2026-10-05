@@ -108,6 +108,11 @@ static int apply_kernelsu_rules_fn(void *ptr)
 
     // allow all!
     ksu_allow(db, KERNEL_SU_DOMAIN, ALL, ALL, ALL);
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "read");
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "write");
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "connectto");
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getopt");
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getattr");
 
     // allow us do any ioctl
     if (db->policyvers >= POLICYDB_VERSION_XPERMS_IOCTL) {
@@ -224,6 +229,11 @@ void apply_kernelsu_rules()
 	ksu_destroy_sepolicy(old_pol);
 
 	reset_avc_cache();
+
+#ifdef CONFIG_KSU_SUSFS
+    susfs_set_batch_sid();
+#endif
+
 out_unlock:
 	mutex_unlock(&selinux_state.policy_mutex);
 #else

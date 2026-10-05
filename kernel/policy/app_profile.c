@@ -12,6 +12,10 @@
 #include <linux/uidgid.h>
 #include <linux/version.h>
 
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#endif
+
 #include "policy/allowlist.h"
 #include "policy/app_profile.h"
 #include "klog.h" // IWYU pragma: keep
@@ -33,7 +37,6 @@ void setup_groups(struct root_profile *profile, struct cred *cred)
     }
 
     if (profile->groups_count == 1 && profile->groups[0] == 0) {
-        // setgroup to root and return early.
         if (cred->group_info)
             put_group_info(cred->group_info);
         cred->group_info = get_group_info(&root_groups);
@@ -70,10 +73,6 @@ void setup_groups(struct root_profile *profile, struct cred *cred)
 
 void seccomp_filter_release(struct task_struct *tsk);
 
-// https://cs.android.com/android/_/android/kernel/common/+/5346453405bf12d7ed6003f45dd47b71744fe1be
-// Some 15-6.6 kernel have this backport while others don't have, e.g. Pixel 10
-// See also:
-// https://github.com/tiann/KernelSU/issues/3629
 #define NEED_BACKPORT_COMPAT                                                                                           \
     LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 
@@ -94,10 +93,7 @@ void disable_seccomp(void)
 	}
 #endif
 
-    // Refer to kernel/seccomp.c: seccomp_set_mode_strict
-    // When disabling Seccomp, ensure that current->sighand->siglock is held during the operation.
     spin_lock_irq(&current->sighand->siglock);
-    // disable seccomp
 #if defined(CONFIG_GENERIC_ENTRY) &&                                           \
     LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
     clear_syscall_work(SECCOMP);
@@ -112,7 +108,6 @@ void disable_seccomp(void)
 #endif
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) &&                           \
      !defined(KSU_OPTIONAL_SECCOMP_FILTER_RELEASE))
-    // put_seccomp_filter is allowed while we holding sighand
     put_seccomp_filter(current);
 #endif
     current->seccomp.mode = 0;
@@ -123,7 +118,6 @@ void disable_seccomp(void)
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) ||                          \
      defined(KSU_OPTIONAL_SECCOMP_FILTER_RELEASE))
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
-    // https://github.com/torvalds/linux/commit/bfafe5efa9754ebc991750da0bcca2a6694f3ed3#diff-45eb79a57536d8eccfc1436932f093eb5c0b60d9361c39edb46581ad313e8987R576-R577
     fake->flags |= PF_EXITING;
 #elif NEED_BACKPORT_COMPAT
     if (has_call_to_spin_lock) {
@@ -132,7 +126,6 @@ void disable_seccomp(void)
         fake->sighand = NULL;
     }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-    // https://github.com/torvalds/linux/commit/0d8315dddd2899f519fe1ca3d4d5cdaf44ea421e#diff-45eb79a57536d8eccfc1436932f093eb5c0b60d9361c39edb46581ad313e8987R556-R558
     fake->sighand = NULL;
 #endif
     seccomp_filter_release(fake);
@@ -155,7 +148,11 @@ int escape_with_root_profile(void)
         return -ENOMEM;
     }
 
+#ifdef CONFIG_KSU_SUSFS
+    if (susfs_is_current_ksu_domain()) {
+#else
     if (cred->euid.val == 0) {
+#endif
         pr_warn("Already root, don't escape!\n");
         goto out_abort_creds;
     }
@@ -180,17 +177,6 @@ int escape_with_root_profile(void)
 
     BUILD_BUG_ON(sizeof(profile->capabilities.effective) != sizeof(kernel_cap_t));
 
-    /*
-     * Mirror the kernel set*uid path: update cred->user first, then
-     * cred->ucounts, before commit_creds(). commit_creds() moves
-     * RLIMIT_NPROC accounting based on cred->user; if uid changes while
-     * user/ucounts stay stale, the old charge can remain pinned to the
-     * previous UID.
-     * See kernel/sys.c:set_user() and kernel/cred.c:set_cred_ucounts() /
-     * commit_creds():
-     * https://github.com/torvalds/linux/blob/v5.14/kernel/sys.c
-     * https://github.com/torvalds/linux/blob/v5.14/kernel/cred.c
-     */
     new_user = alloc_uid(cred->uid);
     if (!new_user) {
         ret = -ENOMEM;
@@ -200,16 +186,14 @@ int escape_with_root_profile(void)
     free_uid(cred->user);
     cred->user = new_user;
 
-    // v5.14+ added cred->ucounts, so we must refresh it after changing uid/user:
-    // https://github.com/torvalds/linux/commit/905ae01c4ae2ae3df05bb141801b1db4b7d83c61#diff-ff6060da281bd9ef3f24e17b77a9b0b5b2ed2d7208bb69b29107bee69732bd31
-    // on older kernels, per-UID process accounting lives in user_struct.
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
     if (set_cred_ucounts(cred)) {
         goto out_abort_creds;
     }
 #endif
 
-    memcpy(&cred->cap_effective, &profile->capabilities.effective, sizeof(cred->cap_effective));
+    u64 cap_for_ksud = profile->capabilities.effective | CAP_DAC_READ_SEARCH;
+    memcpy(&cred->cap_effective, &cap_for_ksud, sizeof(cred->cap_effective));
     memcpy(&cred->cap_permitted, &profile->capabilities.effective, sizeof(cred->cap_permitted));
     memcpy(&cred->cap_bset, &profile->capabilities.effective, sizeof(cred->cap_bset));
     if (profile->uid != 0) {
@@ -222,16 +206,19 @@ int escape_with_root_profile(void)
 
     commit_creds(cred);
 
-    disable_seccomp();
+    if (likely(test_thread_flag(TIF_SECCOMP)))
+        disable_seccomp();
 
     if (profile->flags & FLAG_KSU_NO_NEW_PRIVS) {
         set_thread_flag(TIF_KSU_DISABLE_ESCAPE_WITH_ROOT);
     }
 
 #ifdef KSU_KPROBES_HOOK
+#ifndef CONFIG_KSU_SUSFS
     for_each_thread (p, t) {
         ksu_set_task_tracepoint_flag(t);
     }
+#endif
 #endif
 
     setup_mount_ns(profile->namespaces);
@@ -245,16 +232,18 @@ out_abort_creds:
     return ret;
 }
 
-void escape_to_root_for_init(void)
+int escape_to_root_for_init(void)
 {
     struct cred *cred = prepare_creds();
     if (!cred) {
         pr_err("Failed to prepare init's creds!\n");
-        return;
+        return -EINVAL;
     }
 
     setup_selinux(KERNEL_SU_CONTEXT, cred);
     commit_creds(cred);
+    
+    return 0;
 }
 
 void __init ksu_app_profile_init(void)

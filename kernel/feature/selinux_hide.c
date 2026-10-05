@@ -20,6 +20,7 @@
 #include  "uapi/feature.h"
 #include "selinux/selinux.h"
 #include "feature/selinux_hide.h"
+#include <linux/susfs_def.h>
 
 static struct page *fake_status = NULL;
 static DEFINE_MUTEX(fake_status_init_mutex);
@@ -91,11 +92,6 @@ static void initialize_fake_status(void)
 	struct selinux_kernel_status *new_status = page_address(new_page);
 	memcpy(new_status, status, sizeof(*status));
 	if (ksu_late_loaded && !new_status->enforcing) {
-		/*
-		 * In late_load mode we may be loaded after setenforce 0.
-		 * Adjust sequence to look like a normal enforcing boot.
-		 * Assumes setenforce 0 was called exactly once.
-		 */
 		new_status->enforcing = 1;
 		new_status->sequence = new_status->policyload ? 4 : 0;
 	}
@@ -209,12 +205,16 @@ static void unhook_selinux_status_open(void)
 	if (resolve_fops("/sys/fs/selinux/status", &ops)) {
 		pr_err("ksu_selinux_hide: sel_handle_status_ops not found on unhook\n");
 		return;
-}
+    }
 
 	patch_fops_slot(&ops->open, my_sel_open_handle_status);
 	orig_sel_open_handle_status = NULL;
 	pr_info("ksu_selinux_hide: unhooked sel_handle_status_ops->open\n");
 }
+
+
+// Disable legacy transaction hooks when SuSFS is active
+#ifndef CONFIG_KSU_SUSFS
 
 typedef ssize_t (*selinux_transaction_write_fn)(struct file *file, const char __user *buf,
 						  size_t size, loff_t *pos);
@@ -232,14 +232,6 @@ static __nocfi ssize_t my_selinux_transaction_write(struct file *file, const cha
 	if (current_uid().val < 10000)
 		goto pass_through;
 
-	/*
-	 * security_check_context() (libselinux) writes the target context
-	 * into /sys/fs/selinux/context on EVERY app start, before setcon().
-	 * Blocking app-uid writes outright broke every app process with
-	 * EINVAL (system_server, uid 1000, survived). Only reject explicit
-	 * root contexts (su/ksu) so root-detection gets an "invalid context"
-	 * answer while real app-context validation passes through.
-	 */
 	if (size != 0 && size <= 128) {
 		char scon[128];
 		if (copy_from_user(scon, buf, size)) {
@@ -300,9 +292,11 @@ static void unhook_selinux_transaction_write(void)
 	pr_info("ksu_selinux_hide: unhooked context ops->write\n");
 }
 
+#endif // #ifndef CONFIG_KSU_SUSFS
+// ================================================================
+
 void ksu_selinux_hide_drop_backup_if_unused(void)
 {
-	/* legacy build keeps no backup sepolicy; nothing to drop */
 }
 
 void ksu_selinux_hide_handle_second_stage(void)
@@ -356,7 +350,9 @@ static int ksu_hide_init_thread(void *data)
 	ksu_wait_stop_input_hook();
 #endif
 
+#ifndef CONFIG_KSU_SUSFS
 	hook_selinux_transaction_write();
+#endif
 
 	int tries = 0;
 try_again:
@@ -388,7 +384,9 @@ void __exit ksu_selinux_hide_exit(void)
 {
 	ksu_unregister_feature_handler(KSU_FEATURE_SELINUX_HIDE);
 	unhook_selinux_status_open();
+#ifndef CONFIG_KSU_SUSFS
 	unhook_selinux_transaction_write();
+#endif
 	mutex_lock(&fake_status_init_mutex);
 	if (fake_status) {
 		__free_page(fake_status);

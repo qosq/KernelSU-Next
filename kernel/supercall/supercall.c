@@ -22,6 +22,12 @@
 
 #include "sulog/event.h"
 
+#include "linux/jump_label.h"
+
+#if defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KSU_SUSFS_SPOOF_UNAME)
+extern struct static_key_false susfs_is_uname_spoof_buffer_set;
+#endif
+
 uint32_t ksuver_override = 0;
 
 #define KSU_DRIVER_PERMISSION_SU_SESSION (1UL << 0)
@@ -95,7 +101,6 @@ int ksu_install_fd(void)
 
 int ksu_install_su_fd(void)
 {
-    // This descriptor must be installed after the exec into ksud.
     return ksu_install_fd_with_permissions(O_CLOEXEC, KSU_DRIVER_PERMISSION_SU_SESSION);
 }
 
@@ -131,7 +136,6 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 		magic2);
 #endif
 
-	// Check if this is a request to install KSU fd
 	if (magic2 == KSU_INSTALL_MAGIC2) {
 		struct ksu_install_fd_tw *tw;
 
@@ -149,11 +153,9 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 		return 0;
 	}
 
-	// extensions 
 	u64 reply = (u64)*arg;
 
 	if (magic2 == CHANGE_MANAGER_UID) {
-		// only root is allowed for this command
 		if (current_uid().val != 0)
 			return 0;
 
@@ -169,7 +171,6 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 	}
 	
 	if (magic2 == GET_SULOG_DUMP_V2) {
-		// only root is allowed for this command
 		if (current_uid().val != 0)
 			return 0;
 
@@ -182,7 +183,6 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 	}
 
 	if (magic2 == CHANGE_KSUVER) {
-		// only root is allowed for this command
 		if (current_uid().val != 0)
 			return 0;
 
@@ -193,10 +193,7 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 			return 0;
 	}
 
-	// WARNING!!! triple ptr zone! ***
-	// https://wiki.c2.com/?ThreeStarProgrammer
 	if (magic2 == CHANGE_SPOOF_UNAME) {
-		// only root is allowed for this command 
 		if (current_uid().val != 0)
 			return 0;
 
@@ -205,43 +202,39 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 		static char original_release_buf[65] = {0};
 		static char original_version_buf[65] = {0};
 
-		// basically void * void __user * void __user *arg
 		void ***ppptr = (uintptr_t)arg;
-
-		// user pointer storage
-		// init this as zero so this works on 32-on-64 compat (LE)
 		uint64_t u_pptr = 0;
 		uint64_t u_ptr = 0;
 
 		pr_info("sys_reboot: ppptr: 0x%lx \n", ppptr);
 
-		// arg here is ***, dereference to pull out **
 		if (copy_from_user(&u_pptr, (void __user *)*ppptr, sizeof(u_pptr)))
 			return 0;
 
 		pr_info("sys_reboot: u_pptr: 0x%lx \n", u_pptr);
 
-		// now we got the __user **
-		// we cannot dereference this as this is __user
-		// we just do another copy_from_user to get it
 		if (copy_from_user(&u_ptr, (void __user *)u_pptr, sizeof(u_ptr)))
 			return 0;
 
 		pr_info("sys_reboot: u_ptr: 0x%lx \n", u_ptr);
 
-		// for release
 		if (strncpy_from_user(release_buf, (char __user *)u_ptr, sizeof(release_buf)) < 0)
 			return 0;
 		release_buf[sizeof(release_buf) - 1] = '\0'; 
 
-		// for version
 		if (strncpy_from_user(version_buf, (char __user *)(u_ptr + strlen(release_buf) + 1), sizeof(version_buf)) < 0)
 			return 0;
 		version_buf[sizeof(version_buf) - 1] = '\0'; 
 
+#if defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KSU_SUSFS_SPOOF_UNAME)
+		if (static_branch_unlikely(&susfs_is_uname_spoof_buffer_set) && (strcmp(release_buf, "default") || strcmp(version_buf, "default"))) {
+			pr_info("susfs: SuSFS uname active, blocking toolkit apply\n");
+			return 0;
+		}
+#endif
+
 		if (original_release_buf[0] == '\0') {
 			struct new_utsname *u_curr = utsname();
-			// we save current version as the original before modifying
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
 			strscpy(original_release_buf, u_curr->release, sizeof(original_release_buf));
 			strscpy(original_version_buf, u_curr->version, sizeof(original_version_buf));
@@ -252,7 +245,6 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 			pr_info("sys_reboot: original uname saved: %s %s\n", original_release_buf, original_version_buf);
 		}
 
-		// so user can reset
 		if (!strcmp(release_buf, "default") || !strcmp(version_buf, "default") ) {
 			memcpy(release_buf, original_release_buf, sizeof(release_buf));
 			memcpy(version_buf, original_version_buf, sizeof(version_buf));
@@ -272,7 +264,6 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 #endif
 		up_write(&uts_sem);
 
-		// we write our confirmation on **
 		if (copy_to_user((void __user *)*arg, &reply, sizeof(reply)))
 			return 0;
 	}

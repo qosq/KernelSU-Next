@@ -17,7 +17,7 @@ bool ksu_module_mounted __read_mostly = false;
 bool ksu_boot_completed __read_mostly = false;
 
 #ifdef CONFIG_KSU_SUSFS
-extern struct static_key_true ksu_is_input_hook_enabled;
+struct static_key_true ksu_is_input_hook_enabled;
 #endif
 
 extern void ksu_avc_spoof_late_init();

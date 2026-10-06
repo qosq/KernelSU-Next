@@ -22,7 +22,7 @@
 #include "feature/selinux_hide.h"
 #include <linux/susfs_def.h>
 
-static struct page *fake_status = NULL;
+struct page *fake_status = NULL;
 static DEFINE_MUTEX(fake_status_init_mutex);
 
 #ifndef KSU_KPROBES_HOOK
@@ -58,7 +58,7 @@ static int ksu_selinux_get_sids(void)
 	return (!ksu_sid || !priv_app_sid) ? -1 : 0;
 }
 
-static void initialize_fake_status(void)
+void initialize_fake_status(void)
 {
 	if (READ_ONCE(fake_status))
 		return;

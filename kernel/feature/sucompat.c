@@ -29,6 +29,9 @@
 #include <linux/susfs_def.h>
 #endif
 
+// Declaration for the chroot check
+extern bool current_chrooted(void);
+
 #include "arch.h"
 #include "policy/allowlist.h"
 #include "policy/feature.h"
